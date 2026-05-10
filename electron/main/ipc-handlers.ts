@@ -18,7 +18,7 @@ import { logger } from './logger'
 import { getProcessRunner, getPythonProcessRunner, getExtPythonExe, terminateProcessRunner, terminateAllProcessRunners } from './process-runner'
 import { getBuiltinExtensionsDir } from './builtin-sync'
 import { spawn } from 'child_process'
-import { assertSafeExtensionId, resolveExtensionPathWithinRoot } from './extension-path-guard'
+import { assertSafeExtensionId, buildExtensionBackupPath, resolveExtensionPathWithinRoot } from './extension-path-guard'
 
 type WindowGetter = () => BrowserWindow | null
 
@@ -724,10 +724,12 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
       const extensionsDir = getSettings(app.getPath('userData')).extensionsDir
       await mkdir(extensionsDir, { recursive: true })
       const destDir = resolveExtensionPathWithinRoot(extensionsDir, extensionId)
+      const backupDir = existsSync(destDir) ? buildExtensionBackupPath(extensionsDir, extensionId, String(Date.now())) : null
 
-      if (existsSync(destDir)) {
+      try {
+      if (backupDir) {
         terminateProcessRunner(extensionId)
-        await rmAsync(destDir, { recursive: true, force: true })
+        await rename(destDir, backupDir)
       }
       await cp(extractDir, destDir, { recursive: true })
 
@@ -752,15 +754,10 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
           const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          try {
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-              logger.info(`[ext-setup] ${line}`)
-              emit({ step: 'setting_up', message: line })
-            })
-          } catch (err) {
-            logger.warn(`[ext-setup] setup.py failed: ${err}`)
-            emit({ step: 'setting_up', message: `Warning: setup failed — ${err}` })
-          }
+          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            logger.info(`[ext-setup] ${line}`)
+            emit({ step: 'setting_up', message: line })
+          })
         }
       } else if (isProcess) {
         // 6b. JS process extension: npm install if package.json present
@@ -793,19 +790,26 @@ export function setupIpcHandlers(pythonBridge: PythonBridge, getWindow: WindowGe
         if (existsSync(join(destDir, 'setup.py'))) {
           emit({ step: 'setting_up', message: 'Setting up Python environment…' })
           const { sm: gpuSm, cudaVersion } = await detectGpuInfo()
-          try {
-            await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
-              logger.info(`[ext-setup] ${line}`)
-              emit({ step: 'setting_up', message: line })
-            })
-          } catch (setupErr: any) {
-            throw new Error(`Extension setup failed: ${setupErr?.message ?? setupErr}`)
-          }
+          await runExtensionSetup(destDir, gpuSm, cudaVersion, (line) => {
+            logger.info(`[ext-setup] ${line}`)
+            emit({ step: 'setting_up', message: line })
+          })
         }
 
         try {
           await axios.post(`${API_BASE_URL}/extensions/reload`, {}, { timeout: 10_000 })
         } catch { /* Python might not be running yet */ }
+      }
+
+      if (backupDir) {
+        await rmAsync(backupDir, { recursive: true, force: true })
+      }
+      } catch (installErr) {
+        await rmAsync(destDir, { recursive: true, force: true }).catch(() => {})
+        if (backupDir && existsSync(backupDir)) {
+          await rename(backupDir, destDir)
+        }
+        throw installErr
       }
 
       emit({ step: 'done', extensionId })
