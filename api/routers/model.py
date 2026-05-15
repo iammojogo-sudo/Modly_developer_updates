@@ -3,7 +3,6 @@ import json
 import time
 import os
 import socket
-import shutil
 import threading
 from pathlib import Path
 from typing import Optional
@@ -28,10 +27,18 @@ _download_controls: dict[str, dict[str, threading.Event]] = {}
 
 
 def _download_control(model_id: str) -> dict[str, threading.Event]:
+    """Return the current control for pause/cancel endpoints."""
     control = _download_controls.get(model_id)
     if control is None:
         control = {"pause": threading.Event(), "cancel": threading.Event()}
         _download_controls[model_id] = control
+    return control
+
+
+def _new_download_control(model_id: str) -> dict[str, threading.Event]:
+    """Create a fresh control for a new download session."""
+    control: dict[str, threading.Event] = {"pause": threading.Event(), "cancel": threading.Event()}
+    _download_controls[model_id] = control
     return control
 
 
@@ -163,9 +170,7 @@ async def hf_download(
 
     # Token: explicit query param > env var > None
     hf_token = token or os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN") or None
-    control = _download_control(model_id)
-    control["pause"].clear()
-    control["cancel"].clear()
+    control = _new_download_control(model_id)
 
     async def stream():
         loop = asyncio.get_running_loop()
@@ -258,12 +263,17 @@ async def hf_download(
         except DownloadPaused:
             yield _fmt({"paused": True, "status": "paused"})
         except DownloadCancelled:
-            shutil.rmtree(dest_dir, ignore_errors=True)
+            # Remove only partial files; completed files are preserved so the
+            # next download can resume from where it left off.
+            for part in Path(dest_dir).rglob("*.part"):
+                part.unlink(missing_ok=True)
             yield _fmt({"cancelled": True, "status": "cancelled"})
         except Exception as exc:
             yield _fmt({"error": str(exc)})
         finally:
-            _download_controls.pop(model_id, None)
+            # Only remove the control if it still belongs to this session.
+            if _download_controls.get(model_id) is control:
+                _download_controls.pop(model_id, None)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -388,7 +398,8 @@ def _download_file_streamed(
 
 
 def _resolve_direct_download_url(url: str, headers: dict[str, str]) -> str:
-    request = Request(url, headers=headers)
+    # HEAD request: follows redirects to get the final CDN URL without downloading the body.
+    request = Request(url, headers=headers, method="HEAD")
     with urlopen(request, timeout=30) as response:
         return response.geturl()
 
