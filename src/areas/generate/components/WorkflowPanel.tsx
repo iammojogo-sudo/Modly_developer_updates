@@ -335,10 +335,22 @@ function TextParamRow({ nodeId, nodes, onPatch }: { nodeId: string; nodes: FlowN
 }
 
 function WaitParamRow({ nodeId }: { nodeId: string }) {
-  const status       = useWorkflowRunStore((s) => s.runState.status)
-  const activeNodeId = useWorkflowRunStore((s) => s.activeNodeId)
-  const continueRun  = useWorkflowRunStore((s) => s.continueRun)
-  const isPaused     = status === 'paused' && activeNodeId === nodeId
+  const waitState       = useWorkflowRunStore((s) => s.waitStates[nodeId])
+  const runningBranchId = useWorkflowRunStore((s) => s.runningBranchId)
+  const status          = useWorkflowRunStore((s) => s.runState.status)
+  const continueRun     = useWorkflowRunStore((s) => s.continueRun)
+
+  const otherBranchRunning = runningBranchId !== null && runningBranchId !== nodeId
+  const inPrePhase  = status === 'running' && runningBranchId === null
+  const isRunning   = waitState === 'running'
+  const canContinue = (waitState === 'pending' || waitState === 'done' || waitState === 'error') && !otherBranchRunning && !inPrePhase
+  const label       = waitState === 'done' || waitState === 'error' ? 'Retry' : 'Continue'
+
+  const buttonClass = waitState === 'error'
+    ? 'bg-red-500/15 border-red-500/30 text-red-400 hover:bg-red-500/25'
+    : waitState === 'done'
+    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25'
+    : 'bg-amber-500/15 border-amber-500/30 text-amber-400 hover:bg-amber-500/25'
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -348,15 +360,29 @@ function WaitParamRow({ nodeId }: { nodeId: string }) {
         </svg>
         <span className="text-[11px] font-medium text-zinc-300">Wait</span>
       </div>
-      {isPaused ? (
+      {waitState ? (
         <button
-          onClick={continueRun}
-          className="w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-400 hover:bg-amber-500/25 transition-colors text-[11px] font-medium animate-pulse"
+          onClick={() => continueRun(nodeId)}
+          disabled={!canContinue}
+          className={`w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-md border transition-colors text-[11px] font-medium ${buttonClass} ${
+            canContinue ? (waitState === 'pending' ? 'animate-pulse' : '') : 'opacity-40 cursor-not-allowed'
+          }`}
         >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"/>
-          </svg>
-          Continue
+          {isRunning ? (
+            <>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="animate-spin">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+              Running…
+            </>
+          ) : (
+            <>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+              {label}
+            </>
+          )}
         </button>
       ) : (
         <p className="text-[10px] text-zinc-600 italic px-0.5">
