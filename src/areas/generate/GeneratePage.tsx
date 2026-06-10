@@ -47,7 +47,7 @@ function ExportDropdown({
 }
 
 // ---------------------------------------------------------------------------
-// ToolButton — icon-only toolbar button with tooltip + active state
+// ToolButton - icon-only toolbar button with tooltip + active state
 // ---------------------------------------------------------------------------
 
 function ToolButton({
@@ -147,7 +147,7 @@ function DecimatePopover({
               <svg className="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <path d="M21 12a9 9 0 1 1-6.219-8.56" />
               </svg>
-              Processing…
+              Processing...
             </>
           ) : 'Apply'}
         </button>
@@ -172,6 +172,34 @@ export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
   mainColor: '#ffffff',
   fillIntensity: 0.6,
   fillColor: '#ffffff',
+}
+
+// Persist the lighting panel settings so they stay put across generations,
+// tab switches, and app restarts (until the user changes or resets them).
+const LIGHT_SETTINGS_KEY = 'modly.lightSettings'
+
+function loadLightSettings(): LightSettings {
+  try {
+    const raw = localStorage.getItem(LIGHT_SETTINGS_KEY)
+    if (!raw) return DEFAULT_LIGHT_SETTINGS
+    const parsed = JSON.parse(raw)
+    return {
+      mainIntensity: typeof parsed.mainIntensity === 'number' ? parsed.mainIntensity : DEFAULT_LIGHT_SETTINGS.mainIntensity,
+      mainColor:     typeof parsed.mainColor === 'string'     ? parsed.mainColor     : DEFAULT_LIGHT_SETTINGS.mainColor,
+      fillIntensity: typeof parsed.fillIntensity === 'number' ? parsed.fillIntensity : DEFAULT_LIGHT_SETTINGS.fillIntensity,
+      fillColor:     typeof parsed.fillColor === 'string'     ? parsed.fillColor     : DEFAULT_LIGHT_SETTINGS.fillColor,
+    }
+  } catch {
+    return DEFAULT_LIGHT_SETTINGS
+  }
+}
+
+function saveLightSettings(s: LightSettings) {
+  try {
+    localStorage.setItem(LIGHT_SETTINGS_KEY, JSON.stringify(s))
+  } catch {
+    // ignore storage write errors
+  }
 }
 
 function LightPopover({
@@ -260,7 +288,7 @@ function SmoothPopover({
       <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Smooth mesh</p>
 
       <div className="flex flex-col gap-1.5">
-        <label className="text-[10px] text-zinc-500">Iterations <span className="text-zinc-600">(1–20)</span></label>
+        <label className="text-[10px] text-zinc-500">Iterations <span className="text-zinc-600">(1-20)</span></label>
         <input
           type="number"
           value={inputValue}
@@ -290,7 +318,7 @@ function SmoothPopover({
               <svg className="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <path d="M21 12a9 9 0 1 1-6.219-8.56" />
               </svg>
-              Processing…
+              Processing...
             </>
           ) : 'Apply'}
         </button>
@@ -307,12 +335,17 @@ export default function GeneratePage(): JSX.Element {
   const [unloadStatus, setUnloadStatus] = useState<'idle' | 'done'>('idle')
   const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
   const [openPanel, setOpenPanel] = useState<'export' | 'decimate' | 'smooth' | 'import' | 'light' | null>(null)
-  const [lightSettings, setLightSettings] = useState<LightSettings>(DEFAULT_LIGHT_SETTINGS)
+  const [lightSettings, setLightSettings] = useState<LightSettings>(loadLightSettings)
   const [decimating, setDecimating] = useState(false)
   const [smoothing, setSmoothing] = useState(false)
   const [importing, setImporting] = useState(false)
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
   const dragging = useRef(false)
+
+  // Persist lighting settings whenever they change, so they survive restarts.
+  useEffect(() => {
+    saveLightSettings(lightSettings)
+  }, [lightSettings])
 
   const isGenerating = useAppStore((s) =>
     s.currentJob?.status === 'uploading' || s.currentJob?.status === 'generating'
@@ -530,7 +563,7 @@ export default function GeneratePage(): JSX.Element {
                   <line x1="12" y1="5" x2="12" y2="15" />
                 </svg>
               )}
-              {importing ? 'Importing…' : 'Import'}
+              {importing ? 'Importing...' : 'Import'}
               {!importing && (
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <polyline points="6 9 12 15 18 9" />
@@ -608,7 +641,7 @@ export default function GeneratePage(): JSX.Element {
                       <circle cx="12" cy="12" r="3" />
                     </svg>
                   )}
-                  {smoothing ? 'Processing…' : 'Smooth'}
+                  {smoothing ? 'Processing...' : 'Smooth'}
                 </button>
                 {openPanel === 'smooth' && (
                   <SmoothPopover
@@ -642,7 +675,7 @@ export default function GeneratePage(): JSX.Element {
                       <line x1="8" y1="17" x2="16" y2="17" />
                     </svg>
                   )}
-                  {decimating ? 'Processing…' : 'Decimate'}
+                  {decimating ? 'Processing...' : 'Decimate'}
                 </button>
                 {openPanel === 'decimate' && (
                   <DecimatePopover
@@ -657,7 +690,7 @@ export default function GeneratePage(): JSX.Element {
             </>
           )}
 
-          {/* Light — always visible, pushed to the right */}
+          {/* Light - always visible, pushed to the right */}
           <div className="relative ml-auto">
             <button
               onClick={() => setOpenPanel((p) => (p === 'light' ? null : 'light'))}
@@ -690,7 +723,7 @@ export default function GeneratePage(): JSX.Element {
           </div>
         </div>
 
-        {/* Tools bar — always visible; transform tools appear once a mesh is selected */}
+        {/* Tools bar - always visible; transform tools appear once a mesh is selected */}
         <div className="flex items-center gap-2 px-3 h-10 border-b border-zinc-800 bg-surface-400 shrink-0">
           {hasModel && meshSelected && (
             <>
