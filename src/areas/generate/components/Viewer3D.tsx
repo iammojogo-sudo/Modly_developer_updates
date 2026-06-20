@@ -1,7 +1,8 @@
-import { Component, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode, ErrorInfo } from 'react'
-import { Canvas, useLoader, useThree } from '@react-three/fiber'
-import { Environment, GizmoHelper, Lightformer, OrbitControls, TransformControls, useGizmoContext, useGLTF } from '@react-three/drei'
+import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode, ErrorInfo, MutableRefObject } from 'react'
+import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber'
+import type { ThreeEvent } from '@react-three/fiber'
+import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
 import { EffectComposer, Outline, Select, Selection } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
@@ -13,7 +14,6 @@ THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree as any
 THREE.Mesh.prototype.raycast = acceleratedRaycast
 import SplatViewer, { type SplatViewerHandle } from './SplatViewer'
 import { useGeneration } from '@shared/hooks/useGeneration'
-import { useApi } from '@shared/hooks/useApi'
 import { useAppStore } from '@shared/stores/appStore'
 import { ViewerToolbar, type ViewMode } from './ViewerToolbar'
 import type { LightSettings } from '../GeneratePage'
@@ -138,16 +138,14 @@ interface MeshModelProps {
   jobId: string
   viewMode: ViewMode
   selected: boolean
-  autoCenter: boolean
-  resetToken: number
   onStats: (stats: { vertices: number; triangles: number }) => void
   onSelect: () => void
   onObject: (obj: THREE.Object3D | null) => void
 }
 
-function MeshModel({ url, jobId, viewMode, selected, autoCenter, resetToken, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
+function MeshModel({ url, jobId, viewMode, selected, onStats, onSelect, onObject }: MeshModelProps): JSX.Element {
   const extension = url.split('?')[0]?.split('.').pop()?.toLowerCase()
-  const common = { url, jobId, viewMode, selected, autoCenter, resetToken, onStats, onSelect, onObject }
+  const common = { url, jobId, viewMode, selected, onStats, onSelect, onObject }
   return extension === 'obj' ? <ObjMeshModel {...common} /> : <GltfMeshModel {...common} />
 }
 
@@ -165,8 +163,6 @@ function SceneMeshModel({
   url,
   viewMode,
   selected,
-  autoCenter,
-  resetToken,
   onStats,
   onSelect,
   onObject,
@@ -223,23 +219,20 @@ function SceneMeshModel({
     }
   }, [scene])
 
-  // Centre the mesh on the grid.
-  // Only runs on first load / model change (autoCenter) or an explicit Reset
-  // (resetToken) — never on plain re-renders, so a live gizmo transform or a
-  // baked "Apply" pose is not silently overwritten.
+  // Centre the mesh on the grid. Runs only on first load / model change — never
+  // on plain re-renders, so a live gizmo transform is not silently overwritten.
   useEffect(() => {
-    if (autoCenter) {
-      // Clear any live gizmo transform before measuring.
-      scene.position.set(0, 0, 0)
-      scene.rotation.set(0, 0, 0)
-      scene.scale.set(1, 1, 1)
-      const box = new THREE.Box3().setFromObject(scene)
-      const center = new THREE.Vector3()
-      box.getCenter(center)
-      scene.position.set(-center.x, -box.min.y, -center.z)
-    }
+    // Clear any cached transform before measuring (useGLTF may reuse a scene
+    // that still carries an earlier gizmo pose).
+    scene.position.set(0, 0, 0)
+    scene.rotation.set(0, 0, 0)
+    scene.scale.set(1, 1, 1)
+    const box = new THREE.Box3().setFromObject(scene)
+    const center = new THREE.Vector3()
+    box.getCenter(center)
+    scene.position.set(-center.x, -box.min.y, -center.z)
 
-    // Compute stats (independent of centering)
+    // Compute stats
     let vertices = 0
     let triangles = 0
     scene.traverse((child) => {
@@ -252,7 +245,7 @@ function SceneMeshModel({
     })
     const roundedTriangles = Math.round(triangles)
     onStats({ vertices: Math.round(vertices), triangles: roundedTriangles })
-  }, [scene, autoCenter, resetToken])
+  }, [scene])
 
   // Thumbnail capture (kept for future use)
   useEffect(() => {
@@ -383,6 +376,413 @@ function GizmoBubbles() {
 }
 
 // ---------------------------------------------------------------------------
+// Transform gizmos — custom move / rotate / scale handles (shared style)
+// ---------------------------------------------------------------------------
+
+type GizmoAxis = 'x' | 'y' | 'z'
+type TranslateHandleId = GizmoAxis | 'xy' | 'yz' | 'xz'
+type ScaleHandleId = GizmoAxis | 'xyz'
+
+const AXIS_COLORS: Record<GizmoAxis, string> = {
+  x: '#f87171',
+  y: '#4ade80',
+  z: '#60a5fa',
+}
+
+const AXIS_DIR: Record<GizmoAxis, [number, number, number]> = {
+  x: [1, 0, 0],
+  y: [0, 1, 0],
+  z: [0, 0, 1],
+}
+
+// Orient a +Y cylinder/cone/box onto each axis.
+const AXIS_ROTATION: Record<GizmoAxis, [number, number, number]> = {
+  x: [0, 0, -Math.PI / 2],
+  y: [0, 0, 0],
+  z: [Math.PI / 2, 0, 0],
+}
+
+// Orient a default-XY torus so its ring spins around each axis.
+const RING_ROTATION: Record<GizmoAxis, [number, number, number]> = {
+  x: [0, Math.PI / 2, 0],
+  y: [Math.PI / 2, 0, 0],
+  z: [0, 0, 0],
+}
+
+// Two-axis plane handles, coloured by their locked (normal) axis.
+const PLANE_HANDLES: {
+  id: 'xy' | 'yz' | 'xz'
+  normal: [number, number, number]
+  color: string
+  position: [number, number, number]
+  rotation: [number, number, number]
+}[] = [
+  { id: 'xy', normal: [0, 0, 1], color: AXIS_COLORS.z, position: [0.26, 0.26, 0], rotation: [0, 0, 0] },
+  { id: 'yz', normal: [1, 0, 0], color: AXIS_COLORS.x, position: [0, 0.26, 0.26], rotation: [0, -Math.PI / 2, 0] },
+  { id: 'xz', normal: [0, 1, 0], color: AXIS_COLORS.y, position: [0.26, 0, 0.26], rotation: [Math.PI / 2, 0, 0] },
+]
+
+const GIZMO_SCREEN_SIZE = 0.12
+
+function lightenColor(hex: string, amount = 0.5): string {
+  return '#' + new THREE.Color(hex).lerp(new THREE.Color('#ffffff'), amount).getHexString()
+}
+
+function intersectPlane(ray: THREE.Ray, origin: THREE.Vector3, normal: THREE.Vector3): THREE.Vector3 | null {
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin)
+  const hit = new THREE.Vector3()
+  return ray.intersectPlane(plane, hit) ? hit : null
+}
+
+// Shared plumbing: follow the object, keep a constant on-screen size, and run
+// the pointer-drag lifecycle (window listeners + OrbitControls locking).
+function useGizmoBase(object: THREE.Object3D) {
+  const camera = useThree((s) => s.camera)
+  const gl = useThree((s) => s.gl)
+  const raycaster = useThree((s) => s.raycaster)
+  const controls = useThree((s) => s.controls) as { enabled: boolean } | null
+
+  const groupRef = useRef<THREE.Group>(null)
+  const ndc = useRef(new THREE.Vector2())
+  const moveRef = useRef<((ev: PointerEvent) => void) | null>(null)
+  const endRef = useRef<(() => void) | null>(null)
+
+  useFrame(() => {
+    const g = groupRef.current
+    if (!g) return
+    object.getWorldPosition(g.position)
+    g.scale.setScalar(Math.max(camera.position.distanceTo(g.position) * GIZMO_SCREEN_SIZE, 0.001))
+  })
+
+  const pointerRay = useCallback((ev: PointerEvent): THREE.Ray => {
+    const rect = gl.domElement.getBoundingClientRect()
+    ndc.current.set(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    )
+    raycaster.setFromCamera(ndc.current, camera)
+    return raycaster.ray
+  }, [camera, gl, raycaster])
+
+  const stop = useCallback(() => {
+    if (!moveRef.current) return
+    window.removeEventListener('pointermove', moveRef.current)
+    window.removeEventListener('pointerup', stop)
+    moveRef.current = null
+    endRef.current?.()
+    endRef.current = null
+    if (controls) controls.enabled = true
+    gl.domElement.style.cursor = ''
+  }, [controls, gl])
+
+  const start = useCallback((onMove: (ev: PointerEvent) => void, onEnd?: () => void) => {
+    moveRef.current = onMove
+    endRef.current = onEnd ?? null
+    if (controls) controls.enabled = false
+    gl.domElement.style.cursor = 'grabbing'
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', stop)
+  }, [controls, gl, stop])
+
+  useEffect(() => stop, [stop])  // release the drag if unmounted mid-interaction
+
+  return { camera, groupRef, pointerRay, start }
+}
+
+function hoverHandlers<T extends string>(
+  id: T,
+  setHovered: (value: T | null) => void,
+  onDown: (e: ThreeEvent<PointerEvent>) => void,
+) {
+  return {
+    onPointerOver: (e: ThreeEvent<PointerEvent>) => { e.stopPropagation(); setHovered(id) },
+    onPointerOut: () => setHovered(null),
+    onPointerDown: onDown,
+  }
+}
+
+function GizmoArrow({ color, active }: { color: string; active: boolean }): JSX.Element {
+  const tint = active ? lightenColor(color) : color
+  return (
+    <group>
+      {/* Invisible, fat hit target spanning the whole arm */}
+      <mesh position={[0, 0.55, 0]}>
+        <cylinderGeometry args={[0.09, 0.09, 1.1, 8]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+      {/* Shaft */}
+      <mesh position={[0, 0.48, 0]} renderOrder={999}>
+        <cylinderGeometry args={[0.014, 0.014, 0.66, 16]} />
+        <meshBasicMaterial color={tint} toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+      {/* Arrowhead */}
+      <mesh position={[0, 0.9, 0]} renderOrder={999}>
+        <coneGeometry args={[0.055, 0.2, 20]} />
+        <meshBasicMaterial color={tint} toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+    </group>
+  )
+}
+
+function GizmoScaleArm({ color, active }: { color: string; active: boolean }): JSX.Element {
+  const tint = active ? lightenColor(color) : color
+  return (
+    <group>
+      {/* Invisible, fat hit target — starts above the centre cube so a
+          centre click hits the uniform-scale handle, not an axis */}
+      <mesh position={[0, 0.6, 0]}>
+        <cylinderGeometry args={[0.09, 0.09, 0.8, 8]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+      {/* Shaft */}
+      <mesh position={[0, 0.42, 0]} renderOrder={999}>
+        <cylinderGeometry args={[0.014, 0.014, 0.7, 16]} />
+        <meshBasicMaterial color={tint} toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+      {/* Cube head */}
+      <mesh position={[0, 0.84, 0]} renderOrder={999}>
+        <boxGeometry args={[0.11, 0.11, 0.11]} />
+        <meshBasicMaterial color={tint} toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+    </group>
+  )
+}
+
+function GizmoRing({ color, active }: { color: string; active: boolean }): JSX.Element {
+  const tint = active ? lightenColor(color) : color
+  return (
+    <group>
+      {/* Invisible, fat hit target */}
+      <mesh>
+        <torusGeometry args={[0.9, 0.06, 8, 48]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+      <mesh renderOrder={999}>
+        <torusGeometry args={[0.9, 0.012, 12, 64]} />
+        <meshBasicMaterial color={tint} toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+    </group>
+  )
+}
+
+function GizmoPlane({ color, active }: { color: string; active: boolean }): JSX.Element {
+  return (
+    <mesh renderOrder={998}>
+      <planeGeometry args={[0.26, 0.26]} />
+      <meshBasicMaterial
+        color={active ? lightenColor(color) : color}
+        transparent
+        opacity={active ? 0.6 : 0.28}
+        side={THREE.DoubleSide}
+        toneMapped={false}
+        depthTest={false}
+        depthWrite={false}
+      />
+    </mesh>
+  )
+}
+
+function TranslateGizmo({ object, onDragStart, onDragEnd }: { object: THREE.Object3D; onDragStart?: () => void; onDragEnd?: () => void }): JSX.Element {
+  const { camera, groupRef, pointerRay, start } = useGizmoBase(object)
+  const [hovered, setHovered] = useState<TranslateHandleId | null>(null)
+  const [activeId, setActiveId] = useState<TranslateHandleId | null>(null)
+  const drag = useRef<{
+    axisDir: THREE.Vector3 | null
+    planeNormal: THREE.Vector3
+    origin: THREE.Vector3
+    startHit: THREE.Vector3
+    startPos: THREE.Vector3
+  } | null>(null)
+
+  const beginDrag = useCallback((id: TranslateHandleId, e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    const origin = new THREE.Vector3()
+    object.getWorldPosition(origin)
+    const startPos = object.position.clone()
+
+    let axisDir: THREE.Vector3 | null = null
+    let planeNormal: THREE.Vector3
+    if (id === 'x' || id === 'y' || id === 'z') {
+      axisDir = new THREE.Vector3(...AXIS_DIR[id])
+      // Drag plane: contains the axis and faces the camera as much as possible.
+      const view = new THREE.Vector3().subVectors(camera.position, origin)
+      planeNormal = view.sub(axisDir.clone().multiplyScalar(view.dot(axisDir)))
+      if (planeNormal.lengthSq() < 1e-6) planeNormal.set(axisDir.y ? 1 : 0, axisDir.y ? 0 : 1, 0)
+      planeNormal.normalize()
+    } else {
+      planeNormal = new THREE.Vector3(...PLANE_HANDLES.find((p) => p.id === id)!.normal)
+    }
+
+    const startHit = intersectPlane(e.ray, origin, planeNormal)
+    if (!startHit) return
+    drag.current = { axisDir, planeNormal, origin, startHit, startPos }
+    setActiveId(id)
+    onDragStart?.()
+    start((ev) => {
+      const d = drag.current
+      if (!d) return
+      const hit = intersectPlane(pointerRay(ev), d.origin, d.planeNormal)
+      if (!hit) return
+      const delta = new THREE.Vector3().subVectors(hit, d.startHit)
+      if (d.axisDir) {
+        object.position.copy(d.startPos).addScaledVector(d.axisDir, delta.dot(d.axisDir))
+      } else {
+        object.position.copy(d.startPos).add(delta)
+      }
+    }, () => { drag.current = null; setActiveId(null); onDragEnd?.() })
+  }, [object, camera, pointerRay, start, onDragStart, onDragEnd])
+
+  return (
+    <group ref={groupRef} renderOrder={999}>
+      {/* Central origin handle (decorative — never blocks picking) */}
+      <mesh raycast={() => null} renderOrder={999}>
+        <sphereGeometry args={[0.05, 20, 20]} />
+        <meshBasicMaterial color="#e4e4e7" toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+
+      {(['x', 'y', 'z'] as GizmoAxis[]).map((axis) => (
+        <group key={axis} rotation={AXIS_ROTATION[axis]} {...hoverHandlers<TranslateHandleId>(axis, setHovered, (e) => beginDrag(axis, e))}>
+          <GizmoArrow color={AXIS_COLORS[axis]} active={hovered === axis || activeId === axis} />
+        </group>
+      ))}
+
+      {PLANE_HANDLES.map((plane) => (
+        <group key={plane.id} position={plane.position} rotation={plane.rotation} {...hoverHandlers<TranslateHandleId>(plane.id, setHovered, (e) => beginDrag(plane.id, e))}>
+          <GizmoPlane color={plane.color} active={hovered === plane.id || activeId === plane.id} />
+        </group>
+      ))}
+    </group>
+  )
+}
+
+function RotateGizmo({ object, onDragStart, onDragEnd }: { object: THREE.Object3D; onDragStart?: () => void; onDragEnd?: () => void }): JSX.Element {
+  const { groupRef, pointerRay, start } = useGizmoBase(object)
+  const [hovered, setHovered] = useState<GizmoAxis | null>(null)
+  const [activeId, setActiveId] = useState<GizmoAxis | null>(null)
+  const drag = useRef<{
+    axisDir: THREE.Vector3
+    origin: THREE.Vector3
+    startVec: THREE.Vector3
+    startQuat: THREE.Quaternion
+  } | null>(null)
+
+  const beginDrag = useCallback((axis: GizmoAxis, e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    const origin = new THREE.Vector3()
+    object.getWorldPosition(origin)
+    const axisDir = new THREE.Vector3(...AXIS_DIR[axis]).normalize()
+    // Rotation happens in the plane perpendicular to the axis (the ring's plane).
+    const startHit = intersectPlane(e.ray, origin, axisDir)
+    if (!startHit) return
+    const startVec = new THREE.Vector3().subVectors(startHit, origin)
+    if (startVec.lengthSq() < 1e-9) return
+    drag.current = { axisDir, origin, startVec, startQuat: object.quaternion.clone() }
+    setActiveId(axis)
+    onDragStart?.()
+    start((ev) => {
+      const d = drag.current
+      if (!d) return
+      const hit = intersectPlane(pointerRay(ev), d.origin, d.axisDir)
+      if (!hit) return
+      const cur = new THREE.Vector3().subVectors(hit, d.origin)
+      // Signed angle between the start and current vectors, around the axis.
+      const cross = new THREE.Vector3().crossVectors(d.startVec, cur)
+      const angle = Math.atan2(cross.dot(d.axisDir), d.startVec.dot(cur))
+      const q = new THREE.Quaternion().setFromAxisAngle(d.axisDir, angle)
+      object.quaternion.copy(d.startQuat).premultiply(q)
+    }, () => { drag.current = null; setActiveId(null); onDragEnd?.() })
+  }, [object, pointerRay, start, onDragStart, onDragEnd])
+
+  return (
+    <group ref={groupRef} renderOrder={999}>
+      {(['x', 'y', 'z'] as GizmoAxis[]).map((axis) => (
+        <group key={axis} rotation={RING_ROTATION[axis]} {...hoverHandlers<GizmoAxis>(axis, setHovered, (e) => beginDrag(axis, e))}>
+          <GizmoRing color={AXIS_COLORS[axis]} active={hovered === axis || activeId === axis} />
+        </group>
+      ))}
+    </group>
+  )
+}
+
+function ScaleGizmo({ object, onDragStart, onDragEnd }: { object: THREE.Object3D; onDragStart?: () => void; onDragEnd?: () => void }): JSX.Element {
+  const { camera, groupRef, pointerRay, start } = useGizmoBase(object)
+  const [hovered, setHovered] = useState<ScaleHandleId | null>(null)
+  const [activeId, setActiveId] = useState<ScaleHandleId | null>(null)
+  const drag = useRef<{
+    axisDir: THREE.Vector3 | null
+    planeNormal: THREE.Vector3
+    origin: THREE.Vector3
+    startProj: number
+    startScale: THREE.Vector3
+    armLength: number
+  } | null>(null)
+
+  const beginDrag = useCallback((id: ScaleHandleId, e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation()
+    const origin = new THREE.Vector3()
+    object.getWorldPosition(origin)
+    // World length of one local unit — maps drag distance to a sensible factor.
+    const armLength = Math.max(groupRef.current?.scale.x ?? 1, 1e-4)
+
+    let axisDir: THREE.Vector3 | null = null
+    let planeNormal: THREE.Vector3
+    if (id === 'xyz') {
+      planeNormal = new THREE.Vector3().subVectors(camera.position, origin).normalize()
+    } else {
+      axisDir = new THREE.Vector3(...AXIS_DIR[id])
+      const view = new THREE.Vector3().subVectors(camera.position, origin)
+      planeNormal = view.sub(axisDir.clone().multiplyScalar(view.dot(axisDir)))
+      if (planeNormal.lengthSq() < 1e-6) planeNormal.set(axisDir.y ? 1 : 0, axisDir.y ? 0 : 1, 0)
+      planeNormal.normalize()
+    }
+
+    const startHit = intersectPlane(e.ray, origin, planeNormal)
+    if (!startHit) return
+    const startRel = new THREE.Vector3().subVectors(startHit, origin)
+    const startProj = axisDir ? startRel.dot(axisDir) : startRel.length()
+    drag.current = { axisDir, planeNormal, origin, startProj, startScale: object.scale.clone(), armLength }
+    setActiveId(id)
+    onDragStart?.()
+    start((ev) => {
+      const d = drag.current
+      if (!d) return
+      const hit = intersectPlane(pointerRay(ev), d.origin, d.planeNormal)
+      if (!hit) return
+      const rel = new THREE.Vector3().subVectors(hit, d.origin)
+      const proj = d.axisDir ? rel.dot(d.axisDir) : rel.length()
+      const factor = Math.max(0.01, 1 + (proj - d.startProj) / d.armLength)
+      if (d.axisDir) {
+        const s = d.startScale.clone()
+        if (d.axisDir.x) s.x = Math.max(0.01, d.startScale.x * factor)
+        if (d.axisDir.y) s.y = Math.max(0.01, d.startScale.y * factor)
+        if (d.axisDir.z) s.z = Math.max(0.01, d.startScale.z * factor)
+        object.scale.copy(s)
+      } else {
+        object.scale.copy(d.startScale).multiplyScalar(factor)
+      }
+    }, () => { drag.current = null; setActiveId(null); onDragEnd?.() })
+  }, [object, camera, pointerRay, start, groupRef, onDragStart, onDragEnd])
+
+  const uniformActive = hovered === 'xyz' || activeId === 'xyz'
+
+  return (
+    <group ref={groupRef} renderOrder={999}>
+      {/* Central cube — uniform scale */}
+      <mesh {...hoverHandlers<ScaleHandleId>('xyz', setHovered, (e) => beginDrag('xyz', e))} renderOrder={999}>
+        <boxGeometry args={[0.12, 0.12, 0.12]} />
+        <meshBasicMaterial color={uniformActive ? lightenColor('#e4e4e7') : '#e4e4e7'} toneMapped={false} transparent depthTest={false} depthWrite={false} />
+      </mesh>
+
+      {(['x', 'y', 'z'] as GizmoAxis[]).map((axis) => (
+        <group key={axis} rotation={AXIS_ROTATION[axis]} {...hoverHandlers<ScaleHandleId>(axis, setHovered, (e) => beginDrag(axis, e))}>
+          <GizmoScaleArm color={AXIS_COLORS[axis]} active={hovered === axis || activeId === axis} />
+        </group>
+      ))}
+    </group>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // EmptyState
 // ---------------------------------------------------------------------------
 
@@ -401,17 +801,15 @@ function EmptyState(): JSX.Element {
 // Viewer3D
 // ---------------------------------------------------------------------------
 
-export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmoMode = null }: { lightSettings?: LightSettings; gizmoMode?: GizmoMode | null }): JSX.Element {
+type TransformSnapshot = { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }
+
+export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmoMode = null, gizmoUndoRef }: { lightSettings?: LightSettings; gizmoMode?: GizmoMode | null; gizmoUndoRef?: MutableRefObject<(() => boolean) | null> }): JSX.Element {
   const { currentJob } = useGeneration()
   const apiUrl = useAppStore((s) => s.apiUrl)
 
   const setStoreMeshStats = useAppStore((s) => s.setMeshStats)
   const meshStats = useAppStore((s) => s.meshStats)
   const setCurrentJob = useAppStore((s) => s.setCurrentJob)
-  const updateCurrentJob = useAppStore((s) => s.updateCurrentJob)
-  const pushMeshUrl = useAppStore((s) => s.pushMeshUrl)
-  const showError = useAppStore((s) => s.showError)
-  const { transformMesh } = useApi()
 
   const [viewMode, setViewMode] = useState<ViewMode>('solid')
   const [autoRotate, setAutoRotate] = useState(false)
@@ -421,19 +819,17 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
   const splatRef = useRef<SplatViewerHandle | null>(null)
 
   const [meshObject, setMeshObject] = useState<THREE.Object3D | null>(null)
-  const [resetToken, setResetToken] = useState(0)
-  const [applying, setApplying] = useState(false)
-  // URLs whose geometry already has a baked transform — these must NOT be
-  // re-centered on load, so the applied pose is shown verbatim.
-  const appliedUrls = useRef<Set<string>>(new Set())
+
+  // Local gizmo-transform history (live TRS), undoable with Ctrl+Z. A snapshot
+  // is taken when a drag starts and committed on release only if it changed.
+  const transformHistory = useRef<TransformSnapshot[]>([])
+  const pendingTransform = useRef<TransformSnapshot | null>(null)
 
   const outputUrl = currentJob?.outputUrl ?? ''
   const modelUrl =
     currentJob?.status === 'done' && currentJob.outputUrl
       ? `${apiUrl}${currentJob.outputUrl}`
       : null
-
-  const autoCenter = !appliedUrls.current.has(outputUrl)
 
   // A .ply/.splat reaching the viewer is always a Gaussian splat here: mesh
   // plys are converted to GLB on import and workflow mesh outputs are .glb.
@@ -480,49 +876,51 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
     link.click()
   }
 
-  const handleResetTransform = () => {
-    const original = currentJob?.originalOutputUrl
-    if (original && currentJob?.outputUrl !== original) {
-      // Was baked via Apply — reload the original (auto-centred on load).
-      updateCurrentJob({ outputUrl: original })
-      pushMeshUrl(original)
-    } else {
-      // Live transform only — re-centre the current scene in place.
-      setResetToken((t) => t + 1)
+  // Snapshot the pre-drag pose when a gizmo manipulation starts.
+  const handleGizmoDragStart = useCallback(() => {
+    if (meshObject) {
+      pendingTransform.current = {
+        p: meshObject.position.clone(),
+        q: meshObject.quaternion.clone(),
+        s: meshObject.scale.clone(),
+      }
     }
-  }
+  }, [meshObject])
 
-  const handleApplyTransform = async () => {
-    if (!meshObject || !currentJob?.outputUrl) return
-    const url = currentJob.outputUrl
-    if (!url.startsWith('/workspace/')) return
-    const path = url.slice('/workspace/'.length)
+  // Commit the snapshot on release, but only if the pose actually changed.
+  const handleGizmoDragEnd = useCallback(() => {
+    const before = pendingTransform.current
+    pendingTransform.current = null
+    if (!before || !meshObject) return
+    const changed = !meshObject.position.equals(before.p)
+      || !meshObject.quaternion.equals(before.q)
+      || !meshObject.scale.equals(before.s)
+    if (changed) transformHistory.current.push(before)
+  }, [meshObject])
 
-    // We bake the full world matrix, which includes the centering offset the
-    // viewer applies on load ("bake what you see"). The result URL is then
-    // flagged so it is NOT re-centered on reload, keeping the visible pose.
-    meshObject.updateWorldMatrix(true, false)
-    const e = meshObject.matrixWorld.elements
-    // THREE stores column-major; emit a row-major 4x4 for the backend.
-    const matrix = [
-      [e[0], e[4], e[8], e[12]],
-      [e[1], e[5], e[9], e[13]],
-      [e[2], e[6], e[10], e[14]],
-      [e[3], e[7], e[11], e[15]],
-    ]
+  // Revert the most recent gizmo manipulation. Returns false when there is
+  // nothing to undo, so the caller can fall back to the mesh-history undo.
+  const undoTransform = useCallback((): boolean => {
+    const prev = transformHistory.current.pop()
+    if (!prev || !meshObject) return false
+    meshObject.position.copy(prev.p)
+    meshObject.quaternion.copy(prev.q)
+    meshObject.scale.copy(prev.s)
+    return true
+  }, [meshObject])
 
-    setApplying(true)
-    try {
-      const result = await transformMesh(path, matrix)
-      appliedUrls.current.add(result.url)
-      updateCurrentJob({ outputUrl: result.url })
-      pushMeshUrl(result.url)
-    } catch (err) {
-      showError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setApplying(false)
-    }
-  }
+  // Expose transform-undo so the page's Ctrl+Z undoes gizmo edits first.
+  useEffect(() => {
+    if (!gizmoUndoRef) return
+    gizmoUndoRef.current = undoTransform
+    return () => { if (gizmoUndoRef.current === undoTransform) gizmoUndoRef.current = null }
+  }, [gizmoUndoRef, undoTransform])
+
+  // Drop the transform history when the model changes.
+  useEffect(() => {
+    transformHistory.current = []
+    pendingTransform.current = null
+  }, [modelUrl])
 
 
   return (
@@ -582,8 +980,6 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
                   jobId={currentJob.id}
                   viewMode={viewMode}
                   selected={selected}
-                  autoCenter={autoCenter}
-                  resetToken={resetToken}
                   onStats={setStoreMeshStats}
                   onSelect={() => setSelected(true)}
                   onObject={setMeshObject}
@@ -592,8 +988,14 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
             </Selection>
           ) : null}
 
-          {selected && gizmoMode && meshObject && (
-            <TransformControls object={meshObject} mode={gizmoMode} />
+          {selected && meshObject && gizmoMode === 'translate' && (
+            <TranslateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
+          )}
+          {selected && meshObject && gizmoMode === 'rotate' && (
+            <RotateGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
+          )}
+          {selected && meshObject && gizmoMode === 'scale' && (
+            <ScaleGizmo object={meshObject} onDragStart={handleGizmoDragStart} onDragEnd={handleGizmoDragEnd} />
           )}
 
           <OrbitControls
@@ -625,33 +1027,6 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
             onScreenshot={handleScreenshot}
             showViewModes={!isSplat}
           />
-        )}
-
-        {/* Transform apply/reset — visible while a gizmo tool is active */}
-        {!isSplat && modelUrl && selected && gizmoMode && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 bg-zinc-900/80 border border-zinc-700/60 backdrop-blur-sm rounded-lg px-1.5 py-1">
-            <button
-              onClick={handleApplyTransform}
-              disabled={applying}
-              className="flex items-center gap-1.5 px-2.5 h-7 rounded-md text-xs font-medium bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-40 disabled:pointer-events-none transition-colors"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M20 6L9 17l-5-5" />
-              </svg>
-              {applying ? 'Applying\u2026' : 'Apply'}
-            </button>
-            <button
-              onClick={handleResetTransform}
-              disabled={applying}
-              className="flex items-center gap-1.5 px-2.5 h-7 rounded-md text-xs font-medium text-zinc-300 hover:text-white hover:bg-zinc-700/60 disabled:opacity-40 disabled:pointer-events-none transition-colors"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M3 7v6h6" />
-                <path d="M21 17A9 9 0 0 0 6 10.3L3 13" />
-              </svg>
-              Reset
-            </button>
-          </div>
         )}
 
         {/* Bottom-left stats overlay */}

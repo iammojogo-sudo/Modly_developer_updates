@@ -313,6 +313,8 @@ export default function GeneratePage(): JSX.Element {
   const [importing, setImporting] = useState(false)
   const [gizmoMode, setGizmoMode] = useState<'translate' | 'rotate' | 'scale' | null>(null)
   const dragging = useRef(false)
+  // Populated by Viewer3D — undoes the latest live gizmo transform, if any.
+  const gizmoUndoRef = useRef<(() => boolean) | null>(null)
 
   const isGenerating = useAppStore((s) =>
     s.currentJob?.status === 'uploading' || s.currentJob?.status === 'generating'
@@ -334,7 +336,7 @@ export default function GeneratePage(): JSX.Element {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return
-      if (e.key === 'z') { e.preventDefault(); undoMesh() }
+      if (e.key === 'z') { e.preventDefault(); if (gizmoUndoRef.current?.()) return; undoMesh() }
       if (e.key === 'y') { e.preventDefault(); redoMesh() }
     }
     window.addEventListener('keydown', handler)
@@ -752,7 +754,7 @@ export default function GeneratePage(): JSX.Element {
 
         {/* Viewer area */}
         <div className="flex-1 relative overflow-hidden">
-          <Viewer3D lightSettings={lightSettings} gizmoMode={gizmoMode} />
+          <Viewer3D lightSettings={lightSettings} gizmoMode={gizmoMode} gizmoUndoRef={gizmoUndoRef} />
           <GenerationHUD />
         </div>
       </div>
