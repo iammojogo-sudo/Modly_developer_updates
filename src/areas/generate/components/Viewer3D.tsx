@@ -3,8 +3,7 @@ import type { ReactNode, ErrorInfo, MutableRefObject } from 'react'
 import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
 import { Environment, GizmoHelper, Lightformer, OrbitControls, useGizmoContext, useGLTF } from '@react-three/drei'
-import { EffectComposer, Outline, Select, Selection, ToneMapping } from '@react-three/postprocessing'
-import { ToneMappingMode } from 'postprocessing'
+import { EffectComposer, Outline, Select, Selection } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh'
@@ -78,16 +77,6 @@ function CanvasCapture({
   useEffect(() => {
     domRef.current = gl.domElement
   }, [gl])
-  return null
-}
-
-// Live-applies the tone-mapping exposure from the Lighting popover. `gl` props are
-// only read at Canvas creation, so exposure must be pushed onto the renderer here.
-function RendererSync({ exposure }: { exposure: number }): null {
-  const gl = useThree((s) => s.gl)
-  useEffect(() => {
-    gl.toneMappingExposure = exposure
-  }, [gl, exposure])
   return null
 }
 
@@ -936,9 +925,9 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
   // Memoise the post-processing stack so its children stay referentially stable.
   // @react-three/postprocessing rebuilds (recompiles) all EffectPasses whenever the
   // <EffectComposer> children identity changes; without this, every Viewer3D re-render
-  // (e.g. dragging a Lighting slider) recompiles the outline/tone-mapping shaders and
-  // flashes a white, un-tone-mapped frame. The Outline still tracks selection through
-  // the <Selection> context, so nothing here needs to depend on render state.
+  // (e.g. dragging a Lighting slider) recompiles the outline shader. The Outline still
+  // tracks selection through the <Selection> context, so nothing here needs to depend
+  // on render state.
   const postProcessing = useMemo(() => (
     <EffectComposer
       autoClear={false}
@@ -953,11 +942,6 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
         hiddenEdgeColor={SELECTION_OUTLINE_HIDDEN_COLOR}
         xRay={false}
       />
-      {/* Tone mapping must live INSIDE the composer: while mounted it forces
-          gl.toneMapping = NoToneMapping, so the Lighting "Exposure" control
-          (RendererSync → gl.toneMappingExposure) only takes effect through
-          this effect's NeutralToneMapping shader. */}
-      <ToneMapping mode={ToneMappingMode.NEUTRAL} />
     </EffectComposer>
   ), [])
 
@@ -982,13 +966,10 @@ export default function Viewer3D({ lightSettings = DEFAULT_LIGHT_SETTINGS, gizmo
             antialias: true,
             preserveDrawingBuffer: true,
             outputColorSpace: THREE.SRGBColorSpace,
-            toneMapping: THREE.NeutralToneMapping,
-            toneMappingExposure: 1.8,
           }}
         >
           <color attach="background" args={['#18181b']} />
           <CanvasCapture domRef={canvasRef} />
-          <RendererSync exposure={lightSettings.exposure ?? DEFAULT_LIGHT_SETTINGS.exposure} />
           <ambientLight intensity={lightSettings.ambientIntensity ?? DEFAULT_LIGHT_SETTINGS.ambientIntensity} />
           <Environment background={false}>
             <Lightformer intensity={2 * (lightSettings.envIntensity ?? DEFAULT_LIGHT_SETTINGS.envIntensity)} position={[0, 4, 4]} scale={8} />

@@ -250,7 +250,6 @@ function LightPopover({
       {lightRow('Sun', 'mainColor', 'mainIntensity', 4)}
       {lightRow('Fill', 'fillColor', 'fillIntensity', 2)}
       {plainRow('Ambient', 'ambientIntensity', 1.5)}
-      {plainRow('Exposure', 'exposure', 3)}
       {plainRow('Environment', 'envIntensity', 2)}
       <button
         onClick={onClose}
