@@ -43,7 +43,6 @@ export interface LightSettings {
   fillIntensity: number
   fillColor: string
   ambientIntensity: number
-  exposure: number
   envIntensity: number
 }
 
@@ -64,14 +63,13 @@ const DEFAULT_OPTIONS: GenerationOptions = {
 export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
   // Matches the offline debug renderer's flat studio rig: two soft directional
   // lights (key ~0.8 / fill ~0.35) + high ambient (0.45) that lifts dark albedo
-  // (black cat) out of "void" shadows, NO IBL (envIntensity 0), neutral exposure.
+  // (black cat) out of "void" shadows, NO IBL (envIntensity 0).
   // All live-adjustable from the Lighting popover (Reset returns here).
   mainIntensity: 0.8,
   mainColor: '#ffffff',
   fillIntensity: 0.35,
   fillColor: '#ffffff',
   ambientIntensity: 0.45,
-  exposure: 1.0,
   envIntensity: 0.0,
 }
 
