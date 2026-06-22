@@ -150,20 +150,41 @@ async function executeExtensionNode(
     return realId ? nodeOutputs.get(realId) : undefined
   }
 
-  let nodeInputPath:     string | undefined
-  let nodeInputText:     string | undefined
-  let nodeInputMeshPath: string | undefined
+  let nodeInputPath:      string | undefined
+  let nodeInputText:      string | undefined
+  let nodeInputMeshPath:  string | undefined
+  const extraImagePaths: string[] = []
 
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
   if (ext?.inputs && ext.inputs.length > 1) {
+    const inputTypes  = ext.inputs
+    const inputPaths  = new Array<string | undefined>(inputTypes.length).fill(undefined)
+
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
-      if (!src) continue
-      if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
-      else if (src.outputType === 'image')  nodeInputPath     = src.filePath
-      else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
-      if (src.text !== undefined)           nodeInputText     = src.text
+      if (!src || !src.filePath) continue
+      let slot = 0
+      if (edge.targetHandle?.startsWith('input-')) {
+        slot = parseInt(edge.targetHandle.slice(6), 10)
+      }
+      if (slot >= 0 && slot < inputTypes.length) {
+        inputPaths[slot] = src.filePath
+      }
+    }
+
+    for (let i = 0; i < inputTypes.length; i++) {
+      const fp = inputPaths[i]
+      if (!fp) continue
+      if (inputTypes[i] === 'mesh') {
+        nodeInputMeshPath = fp
+      } else if (inputTypes[i] === 'image') {
+        if (!nodeInputPath) {
+          nodeInputPath = fp
+        } else {
+          extraImagePaths.push(fp)
+        }
+      }
     }
   } else {
     for (const edge of incomingEdges) {
@@ -193,6 +214,9 @@ async function executeExtensionNode(
       extraParams.mesh_path = norm.startsWith(workspaceDir)
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
+    }
+    if (extraImagePaths.length > 0) {
+      extraParams.extra_image_paths = extraImagePaths
     }
 
     const schemaDefaults = Object.fromEntries(
@@ -242,17 +266,22 @@ async function executeExtensionNode(
       useAppStore.getState().updateCurrentJob({ status: 'generating', progress: st.progress, step: st.step })
     }
   } else {
-    if (ext?.input === 'mesh'  && !nodeInputPath) throw new Error(`${ext.name} needs an incoming mesh connection`)
-    if (ext?.input === 'image' && !nodeInputPath) throw new Error(`${ext.name} needs an incoming image connection`)
-    if (ext?.input === 'text'  && !nodeInputText) throw new Error(`${ext.name} needs an incoming text connection`)
-
     const parts  = (node.data.extensionId ?? '').split('/')
     const extId  = parts[0]
     const nid    = parts[1] ?? ''
+
+    const processParams: Record<string, unknown> = { ...(node.data.params as Record<string, unknown>) }
+    if (nodeInputMeshPath && nodeInputPath) {
+      // Texture node: mesh is filePath, all images in extra_image_paths
+      processParams.extra_image_paths = [nodeInputPath, ...extraImagePaths]
+    } else if (extraImagePaths.length > 0) {
+      processParams.extra_image_paths = extraImagePaths
+    }
+
     const result = await window.electron.extensions.runProcess(
       extId,
-      { filePath: nodeInputPath, text: nodeInputText, nodeId: nid },
-      node.data.params as Record<string, unknown>,
+      { filePath: nodeInputMeshPath ?? nodeInputPath, text: nodeInputText, nodeId: nid },
+      processParams,
     )
     if (!result.success) throw new Error(result.error ?? 'Process extension failed')
     nodeInputPath = result.result?.filePath ?? nodeInputPath
