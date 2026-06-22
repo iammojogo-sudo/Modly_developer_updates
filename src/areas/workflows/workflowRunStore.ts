@@ -163,7 +163,7 @@ async function executeExtensionNode(
 
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
-      if (!src || !src.filePath) continue
+      if (!src || (!src.filePath && src.text === undefined)) continue
       let slot = 0
       if (edge.targetHandle?.startsWith('input-')) {
         slot = parseInt(edge.targetHandle.slice(6), 10)
@@ -171,6 +171,7 @@ async function executeExtensionNode(
       if (slot >= 0 && slot < inputTypes.length) {
         inputPaths[slot] = src.filePath
       }
+      if (src.text !== undefined) nodeInputText = src.text
     }
 
     for (let i = 0; i < inputTypes.length; i++) {
@@ -197,16 +198,28 @@ async function executeExtensionNode(
   const isModelNode = ext?.type === 'model'
 
   if (isModelNode) {
-    const activeImagePath = nodeInputPath ?? selectedImagePath
-    if (!selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+    const inputType = ext?.input ?? ext?.inputs?.[0]
+    const isTextInput = inputType === 'text'
+
+    const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
+    if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
-    const base64 = selectedImageData && nodeInputPath === undefined
-      ? selectedImageData
-      : await window.electron.fs.readFileBase64(activeImagePath as string)
-    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-    const blob  = new Blob([bytes], { type: 'image/png' })
-    const fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+
+    let blob: Blob
+    let fname: string
+    if (isTextInput || (!activeImagePath && selectedImageData)) {
+      const base64 = selectedImageData && nodeInputPath === undefined
+        ? selectedImageData
+        : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
+      fname = 'placeholder.png'
+      blob = new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], { type: 'image/png' })
+    } else {
+      const base64 = await window.electron.fs.readFileBase64(activeImagePath as string)
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+      blob = new Blob([bytes], { type: 'image/png' })
+      fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+    }
 
     const extraParams: Record<string, unknown> = {}
     if (nodeInputMeshPath) {
@@ -217,6 +230,9 @@ async function executeExtensionNode(
     }
     if (extraImagePaths.length > 0) {
       extraParams.extra_image_paths = extraImagePaths
+    }
+    if (nodeInputText !== undefined) {
+      extraParams.prompt = nodeInputText
     }
 
     const schemaDefaults = Object.fromEntries(
