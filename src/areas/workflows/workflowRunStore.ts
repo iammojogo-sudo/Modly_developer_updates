@@ -158,34 +158,13 @@ async function executeExtensionNode(
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
   if (ext?.inputs && ext.inputs.length > 1) {
-    const inputTypes  = ext.inputs
-    const inputPaths  = new Array<string | undefined>(inputTypes.length).fill(undefined)
-
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
-      if (!src || (!src.filePath && src.text === undefined)) continue
-      let slot = 0
-      if (edge.targetHandle?.startsWith('input-')) {
-        slot = parseInt(edge.targetHandle.slice(6), 10)
-      }
-      if (slot >= 0 && slot < inputTypes.length) {
-        inputPaths[slot] = src.filePath
-      }
-      if (src.text !== undefined) nodeInputText = src.text
-    }
-
-    for (let i = 0; i < inputTypes.length; i++) {
-      const fp = inputPaths[i]
-      if (!fp) continue
-      if (inputTypes[i] === 'mesh') {
-        nodeInputMeshPath = fp
-      } else if (inputTypes[i] === 'image') {
-        if (!nodeInputPath) {
-          nodeInputPath = fp
-        } else {
-          extraImagePaths.push(fp)
-        }
-      }
+      if (!src) continue
+      if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
+      else if (src.outputType === 'image')  nodeInputPath     = src.filePath
+      else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
+      if (src.text !== undefined)           nodeInputText     = src.text
     }
   } else {
     for (const edge of incomingEdges) {
@@ -198,17 +177,18 @@ async function executeExtensionNode(
   const isModelNode = ext?.type === 'model'
 
   if (isModelNode) {
-    const inputType = ext?.input ?? ext?.inputs?.[0]
-    const isTextInput = inputType === 'text'
+    const isTextOnly = ext?.inputs
+      ? ext.inputs.every((i) => i === 'text')
+      : ext?.input === 'text'
 
-    const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
-    if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+    const activeImagePath = isTextOnly ? undefined : (nodeInputPath ?? selectedImagePath)
+    if (!isTextOnly && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
 
     let blob: Blob
     let fname: string
-    if (isTextInput || (!activeImagePath && selectedImageData)) {
+    if (isTextOnly || (!activeImagePath && selectedImageData)) {
       const base64 = selectedImageData && nodeInputPath === undefined
         ? selectedImageData
         : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
@@ -231,8 +211,9 @@ async function executeExtensionNode(
     if (extraImagePaths.length > 0) {
       extraParams.extra_image_paths = extraImagePaths
     }
-    if (nodeInputText !== undefined) {
+    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
       extraParams.prompt = nodeInputText
+      extraParams.text   = nodeInputText
     }
 
     const schemaDefaults = Object.fromEntries(
