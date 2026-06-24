@@ -158,13 +158,33 @@ async function executeExtensionNode(
   const incomingEdges = workflow.edges.filter((e) => e.target === node.id)
 
   if (ext?.inputs && ext.inputs.length > 1) {
+    const inputTypes  = ext.inputs
+    const inputPaths  = new Array<string | undefined>(inputTypes.length).fill(undefined)
+
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
-      if (!src) continue
-      if (src.outputType === 'mesh')        nodeInputMeshPath = src.filePath
-      else if (src.outputType === 'image')  nodeInputPath     = src.filePath
-      else if (src.filePath !== undefined)  nodeInputPath     = src.filePath
-      if (src.text !== undefined)           nodeInputText     = src.text
+      if (!src || !src.filePath) continue
+      let slot = 0
+      if (edge.targetHandle?.startsWith('input-')) {
+        slot = parseInt(edge.targetHandle.slice(6), 10)
+      }
+      if (slot >= 0 && slot < inputTypes.length) {
+        inputPaths[slot] = src.filePath
+      }
+    }
+
+    for (let i = 0; i < inputTypes.length; i++) {
+      const fp = inputPaths[i]
+      if (!fp) continue
+      if (inputTypes[i] === 'mesh') {
+        nodeInputMeshPath = fp
+      } else if (inputTypes[i] === 'image') {
+        if (!nodeInputPath) {
+          nodeInputPath = fp
+        } else {
+          extraImagePaths.push(fp)
+        }
+      }
     }
   } else {
     for (const edge of incomingEdges) {
