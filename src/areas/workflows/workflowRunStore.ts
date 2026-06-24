@@ -163,14 +163,17 @@ async function executeExtensionNode(
 
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
-      if (!src || !src.filePath) continue
-      let slot = 0
-      if (edge.targetHandle?.startsWith('input-')) {
-        slot = parseInt(edge.targetHandle.slice(6), 10)
+      if (!src) continue
+      if (src.filePath) {
+        let slot = 0
+        if (edge.targetHandle?.startsWith('input-')) {
+          slot = parseInt(edge.targetHandle.slice(6), 10)
+        }
+        if (slot >= 0 && slot < inputTypes.length) {
+          inputPaths[slot] = src.filePath
+        }
       }
-      if (slot >= 0 && slot < inputTypes.length) {
-        inputPaths[slot] = src.filePath
-      }
+      if (src.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
     }
 
     for (let i = 0; i < inputTypes.length; i++) {
@@ -190,7 +193,7 @@ async function executeExtensionNode(
     for (const edge of incomingEdges) {
       const src = resolveSource(edge.source)
       if (src?.filePath !== undefined) nodeInputPath = src.filePath
-      if (src?.text     !== undefined) nodeInputText = src.text
+      if (src?.text !== undefined && src.text.trim().length > 0) nodeInputText = src.text
     }
   }
 
