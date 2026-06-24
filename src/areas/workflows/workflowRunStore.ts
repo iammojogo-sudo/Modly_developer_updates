@@ -176,16 +176,26 @@ async function executeExtensionNode(
   const isModelNode = ext?.type === 'model'
 
   if (isModelNode) {
-    const activeImagePath = nodeInputPath ?? selectedImagePath
-    if (!selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
+    const isTextInput = ext?.input === 'text' || (ext?.inputs && ext.inputs.every((i) => i === 'text'))
+    const activeImagePath = isTextInput ? undefined : (nodeInputPath ?? selectedImagePath)
+    if (!isTextInput && !selectedImageData && (!activeImagePath || activeImagePath.trim().length === 0)) {
       throw new Error('No input image selected for model node')
     }
-    const base64 = selectedImageData && nodeInputPath === undefined
-      ? selectedImageData
-      : await window.electron.fs.readFileBase64(activeImagePath as string)
-    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-    const blob  = new Blob([bytes], { type: 'image/png' })
-    const fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+
+    let blob: Blob
+    let fname: string
+    if (isTextInput || (!activeImagePath && selectedImageData)) {
+      const base64 = selectedImageData && nodeInputPath === undefined
+        ? selectedImageData
+        : 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' // 1x1 transparent PNG
+      fname = 'placeholder.png'
+      blob = new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], { type: 'image/png' })
+    } else {
+      const base64 = await window.electron.fs.readFileBase64(activeImagePath as string)
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+      blob = new Blob([bytes], { type: 'image/png' })
+      fname = activeImagePath?.split(/[\\/]/).pop() ?? 'image.png'
+    }
 
     const extraParams: Record<string, unknown> = {}
     if (nodeInputMeshPath) {
@@ -193,6 +203,10 @@ async function executeExtensionNode(
       extraParams.mesh_path = norm.startsWith(workspaceDir)
         ? norm.slice(workspaceDir.length).replace(/^\//, '')
         : norm
+    }
+    if (nodeInputText !== undefined && nodeInputText.trim().length > 0) {
+      extraParams.prompt = nodeInputText
+      extraParams.text   = nodeInputText
     }
 
     const schemaDefaults = Object.fromEntries(
