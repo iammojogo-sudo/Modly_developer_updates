@@ -16,6 +16,7 @@ function nodeLabel(node: WFNode, allExtensions: WorkflowExtension[]): string {
   if (node.type === 'meshNode') return 'Load 3D Mesh'
   if (node.type === 'outputNode') return 'Add to Scene'
   if (node.type === 'previewNode') return 'Preview Views'
+  if (node.type === 'imagePreviewNode') return 'Preview Image'
   if (node.type === 'extensionNode') {
     return getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.name ?? 'Extension'
   }
@@ -39,6 +40,7 @@ function getNodeOutputType(node: WFNode, allExtensions: WorkflowExtension[]): Da
   if (node.type === 'textNode') return 'text'
   if (node.type === 'meshNode' || node.type === 'outputNode') return 'mesh'
   if (node.type === 'previewNode') return 'image'
+  if (node.type === 'imagePreviewNode') return 'image'
   if (node.type === 'extensionNode') {
     return getWorkflowExtension(node.data.extensionId ?? '', allExtensions)?.output
   }
